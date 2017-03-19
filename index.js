@@ -5,6 +5,7 @@
  * 4. Update service again
  */
 const request = require('request-promise');
+const Promise = require('bluebird');
 const argv = require('yargs')
   .usage('Usage: $0 -c [client] -s [secret] -k [key] -d [domain] -n [name]')
   .alias('c', 'client')
@@ -15,7 +16,7 @@ const argv = require('yargs')
   .demandOption(['c', 's', 'k', 'd', 'n' ])
   .argv;
 
-const updateDocker = require('./lib/update-docker');
+const DockerOps = require('./lib/update-docker');
 
 const headers = {
   url: `https://${argv.domain}/oauth/token`,
@@ -35,8 +36,31 @@ request(headers)
   .then((resp) => {
     const parsedResponse = JSON.parse(resp);
     const accessToken = parsedResponse.access_token;
-    return updateDocker(argv.name, argv.key, accessToken);
+    const service = DockerOps.getService(argv.name);
+    const secret = DockerOps.getSecret(argv.key);
+
+    return Promise.join(service, secret, (serviceObj, secretObj) => ({
+      service: serviceObj,
+      secret: secretObj,
+      accessToken
+    }));
   })
+  .then((results) => {
+    const removeSecret = DockerOps.removeSecretFromService(argv.key, results.service);
+    return removeSecret.then(() => results)
+  })
+  .then((results) =>
+    results.secret.remove()
+      .then(() => ({
+        accessToken: results.accessToken,
+        service: results.service
+      }))
+  )
+  .then((results) =>
+    DockerOps.createSecret(argv.key, results.accessToken)
+      .then((secret) => Object.assign({}, results, { secret }))
+  )
+  .then((results) => DockerOps.addSecretToService(results.service, results.secret))
   .catch((err) => {
     console.error('Error:', err);
     process.exit(1);
